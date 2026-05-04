@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+sqlalchemy
+python-multipart
+pandas
+openpyxl
+PySide6
+jinja2
+python-slugify
