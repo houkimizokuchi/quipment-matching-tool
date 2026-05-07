@@ -4,6 +4,12 @@ import { Search, Package, MapPin, User, Calendar, Loader2, AlertCircle, Trash2, 
 import { Link } from 'react-router-dom'
 
 export default function EquipmentList() {
+  const getCurrentFiscalYear = () => {
+    const today = new Date()
+    const month = today.getMonth() + 1
+    return month <= 3 ? today.getFullYear() - 1 : today.getFullYear()
+  }
+
   const [equipments, setEquipments] = useState([])
   const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
@@ -11,8 +17,15 @@ export default function EquipmentList() {
   const [deleteTargetId, setDeleteTargetId] = useState(null)
   const [currentPage, setCurrentPage] = useState(1)
   const [totalCount, setTotalCount] = useState(0)
+  const [summary, setSummary] = useState({ total: 0, checked: 0, percentage: 0 })
+  const [fiscalYear, setFiscalYear] = useState(getCurrentFiscalYear())
+  const [onlyUnchecked, setOnlyUnchecked] = useState(false)
   const itemsPerPage = 100
   const deleteTargetIdRef = useRef(null)
+
+  // 年度リストの生成 (今年度から5年前まで)
+  const currentFY = getCurrentFiscalYear()
+  const fiscalYears = Array.from({ length: 6 }, (_, i) => currentFY - i)
 
   // refを常に最新のステートと同期させる
   useEffect(() => {
@@ -20,8 +33,8 @@ export default function EquipmentList() {
   }, [deleteTargetId])
 
   useEffect(() => {
-    fetchEquipments(search, currentPage)
-  }, [currentPage])
+    fetchEquipments(search, currentPage, fiscalYear, onlyUnchecked)
+  }, [currentPage, fiscalYear, onlyUnchecked])
 
   useEffect(() => {
     const handleMessage = (event) => {
@@ -34,20 +47,26 @@ export default function EquipmentList() {
     return () => window.removeEventListener('message', handleMessage)
   }, [])
 
-  const fetchEquipments = async (searchTerm = '', page = 1) => {
+  const fetchEquipments = async (searchTerm = '', page = 1, fy = fiscalYear, unchecked = onlyUnchecked) => {
     setLoading(true)
     try {
       const skip = (page - 1) * itemsPerPage
       
-      const [countRes, dataRes] = await Promise.all([
-        axios.get('/api/equipments/count', { params: { search: searchTerm } }),
+      const [countRes, dataRes, summaryRes] = await Promise.all([
+        axios.get('/api/equipments/count', { 
+          params: { search: searchTerm, fiscal_year: fy, only_unchecked: unchecked } 
+        }),
         axios.get('/api/equipments/', {
-          params: { search: searchTerm, skip: skip, limit: itemsPerPage }
+          params: { search: searchTerm, skip: skip, limit: itemsPerPage, fiscal_year: fy, only_unchecked: unchecked }
+        }),
+        axios.get('/api/equipments/summary', {
+          params: { fiscal_year: fy }
         })
       ])
       
       setTotalCount(countRes.data.count)
       setEquipments(dataRes.data)
+      setSummary(summaryRes.data)
       setError(null)
     } catch (err) {
       console.error('Error fetching equipments:', err)
@@ -65,7 +84,7 @@ export default function EquipmentList() {
   const handleSearchSubmit = (e) => {
     e.preventDefault()
     if (currentPage === 1) {
-      fetchEquipments(search, 1)
+      fetchEquipments(search, 1, fiscalYear, onlyUnchecked)
     } else {
       setCurrentPage(1) // useEffect will trigger fetch
     }
@@ -145,6 +164,57 @@ export default function EquipmentList() {
           </button>
         </form>
       </div>
+      
+      {/* 年度選択とフィルタ */}
+      <div className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm mb-6 flex flex-wrap items-center justify-between gap-4">
+        <div className="flex items-center space-x-6">
+          <div className="flex items-center">
+            <label className="text-sm font-medium text-gray-700 mr-2">対象年度:</label>
+            <select
+              value={fiscalYear}
+              onChange={(e) => {
+                setFiscalYear(parseInt(e.target.value))
+                setCurrentPage(1)
+              }}
+              className="bg-gray-50 border border-gray-200 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block p-2 outline-none"
+            >
+              {fiscalYears.map(year => (
+                <option key={year} value={year}>{year}年度 (R{year - 2018})</option>
+              ))}
+            </select>
+          </div>
+          
+          <div className="flex items-center">
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input 
+                type="checkbox" 
+                checked={onlyUnchecked} 
+                onChange={(e) => {
+                  setOnlyUnchecked(e.target.checked)
+                  setCurrentPage(1)
+                }}
+                className="sr-only peer" 
+              />
+              <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+              <span className="ml-3 text-sm font-medium text-gray-700">未点検のみ表示</span>
+            </label>
+          </div>
+        </div>
+
+        {!loading && (
+          <div className="flex items-center space-x-4">
+             <div className="text-sm text-gray-600">
+               進捗: <span className="font-bold text-blue-600">{summary.checked}</span> / {summary.total}
+             </div>
+             <div className="w-48 bg-gray-200 rounded-full h-2.5">
+               <div className="bg-blue-600 h-2.5 rounded-full transition-all duration-500" style={{ width: `${summary.percentage}%` }}></div>
+             </div>
+             <div className="text-sm font-bold text-blue-600 w-12 text-right">
+               {Math.round(summary.percentage)}%
+             </div>
+          </div>
+        )}
+      </div>
 
       {error && (
         <div className="bg-red-50 border-l-4 border-red-500 p-4 mb-6 flex items-center text-red-700">
@@ -162,8 +232,8 @@ export default function EquipmentList() {
                 <th className="px-6 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider">品名</th>
                 <th className="px-6 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider">銘柄・規格等</th>
                 <th className="px-6 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider">保管場所</th>
-                 <th className="px-6 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider">責任者</th>
-                <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">取得日</th>
+                <th className="px-6 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider">責任者</th>
+                <th className="px-6 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider">点検状況</th>
                 <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">操作</th>
               </tr>
             </thead>
@@ -218,7 +288,19 @@ export default function EquipmentList() {
                         {eq.person_in_charge || <span className="text-gray-300 italic">未設定</span>}
                       </div>
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{eq.acquisition_date || '-'}</td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      {eq.last_audit_at ? (
+                        <div className="flex flex-col">
+                          <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800 border border-green-200 w-fit">
+                            済 ({new Date(eq.last_audit_at).toLocaleDateString('ja-JP', {month: 'numeric', day: 'numeric'})})
+                          </span>
+                        </div>
+                      ) : (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-400 border border-gray-200 w-fit">
+                          未完了
+                        </span>
+                      )}
+                    </td>
                     <td className="px-6 py-4 whitespace-nowrap flex items-center space-x-2">
                       <Link
                         to={`/equipment/${eq.equipment_number}`}

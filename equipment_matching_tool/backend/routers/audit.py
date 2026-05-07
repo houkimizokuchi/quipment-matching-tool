@@ -8,8 +8,7 @@ import uuid
 import pandas as pd
 import io
 from datetime import datetime
-
-from .. import models, schemas
+from .. import models, schemas, utils
 from ..database import get_db
 
 router = APIRouter(
@@ -73,9 +72,19 @@ def read_audit_logs(skip: int = 0, limit: int = 100, db: Session = Depends(get_d
     return logs
 
 @router.get("/export")
-def export_audit_logs(db: Session = Depends(get_db)):
+def export_audit_logs(fiscal_year: Optional[int] = None, db: Session = Depends(get_db)):
     # 履歴データと備品データを結合して取得
-    logs = db.query(models.AuditLog).join(models.Equipment).all()
+    query = db.query(models.AuditLog).join(models.Equipment)
+    
+    if fiscal_year:
+        from .. import utils
+        start_date, end_date = utils.get_fiscal_year_range(fiscal_year)
+        query = query.filter(models.AuditLog.checked_at.between(start_date, end_date))
+        filename = f"audit_results_{fiscal_year}.xlsx"
+    else:
+        filename = "audit_results_all.xlsx"
+        
+    logs = query.all()
     
     data = []
     for log in logs:
@@ -101,7 +110,7 @@ def export_audit_logs(db: Session = Depends(get_db)):
     output.seek(0)
     
     headers = {
-        'Content-Disposition': 'attachment; filename="audit_results.xlsx"'
+        'Content-Disposition': f'attachment; filename="{filename}"'
     }
     
     return StreamingResponse(output, headers=headers, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')

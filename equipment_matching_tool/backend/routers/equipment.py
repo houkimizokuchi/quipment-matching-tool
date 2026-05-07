@@ -1,17 +1,38 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Header
 from sqlalchemy.orm import Session
-from typing import List
+from sqlalchemy import func
+from typing import List, Optional
 import pandas as pd
 import io
 import os
 
-from .. import models, schemas
+from .. import models, schemas, utils
 from ..database import get_db
 
 router = APIRouter(
     prefix="/equipments",
     tags=["equipments"]
 )
+
+@router.get("/summary")
+def get_summary(fiscal_year: Optional[int] = None, db: Session = Depends(get_db)):
+    if fiscal_year is None:
+        fiscal_year = utils.get_fiscal_year()
+    
+    start_date, end_date = utils.get_fiscal_year_range(fiscal_year)
+    
+    total_count = db.query(models.Equipment).filter(models.Equipment.is_active == True).count()
+    
+    checked_count = db.query(models.AuditLog.equipment_number).filter(
+        models.AuditLog.checked_at.between(start_date, end_date)
+    ).distinct().count()
+    
+    return {
+        "fiscal_year": fiscal_year,
+        "total": total_count,
+        "checked": checked_count,
+        "percentage": (checked_count / total_count * 100) if total_count > 0 else 0
+    }
 
 @router.post("/", response_model=schemas.Equipment)
 def create_equipment(equipment: schemas.EquipmentCreate, db: Session = Depends(get_db)):
@@ -137,8 +158,24 @@ def get_progress(db: Session = Depends(get_db)):
     return result
 
 @router.get("/count")
-def count_equipments(search: str = None, db: Session = Depends(get_db)):
+def count_equipments(
+    search: str = None, 
+    fiscal_year: Optional[int] = None,
+    only_unchecked: bool = False,
+    db: Session = Depends(get_db)
+):
+    if fiscal_year is None:
+        fiscal_year = utils.get_fiscal_year()
+    
+    start_date, end_date = utils.get_fiscal_year_range(fiscal_year)
+    
+    # サブクエリ: 指定年度の点検記録があるかどうか
+    subquery = db.query(models.AuditLog.equipment_number).filter(
+        models.AuditLog.checked_at.between(start_date, end_date)
+    ).distinct().subquery()
+    
     query = db.query(models.Equipment)
+    
     if search:
         query = query.filter(
             (models.Equipment.equipment_number.contains(search)) | 
@@ -147,6 +184,10 @@ def count_equipments(search: str = None, db: Session = Depends(get_db)):
             (models.Equipment.storage_location.contains(search)) |
             (models.Equipment.person_in_charge.contains(search))
         )
+    
+    if only_unchecked:
+        query = query.filter(~models.Equipment.equipment_number.in_(subquery))
+        
     return {"count": query.count()}
 
 @router.get("/{equipment_number}", response_model=schemas.EquipmentDetail)
@@ -157,9 +198,36 @@ def read_equipment(equipment_number: str, db: Session = Depends(get_db)):
     return db_equipment
 
 
-@router.get("/", response_model=List[schemas.Equipment])
-def read_equipments(search: str = None, skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    query = db.query(models.Equipment)
+@router.get("/", response_model=List[schemas.EquipmentWithStatus])
+def read_equipments(
+    search: str = None, 
+    skip: int = 0, 
+    limit: int = 100, 
+    fiscal_year: Optional[int] = None,
+    only_unchecked: bool = False,
+    db: Session = Depends(get_db)
+):
+    if fiscal_year is None:
+        fiscal_year = utils.get_fiscal_year()
+    
+    start_date, end_date = utils.get_fiscal_year_range(fiscal_year)
+    
+    # 最新の点検記録を取得するサブクエリ（指定年度内）
+    subquery = db.query(
+        models.AuditLog.equipment_number,
+        func.max(models.AuditLog.checked_at).label('last_audit_at')
+    ).filter(
+        models.AuditLog.checked_at.between(start_date, end_date)
+    ).group_by(models.AuditLog.equipment_number).subquery()
+
+    # メインクエリ: 備品とサブクエリを外部結合
+    query = db.query(
+        models.Equipment,
+        subquery.c.last_audit_at
+    ).outerjoin(
+        subquery, models.Equipment.equipment_number == subquery.c.equipment_number
+    )
+    
     if search:
         query = query.filter(
             (models.Equipment.equipment_number.contains(search)) | 
@@ -168,7 +236,23 @@ def read_equipments(search: str = None, skip: int = 0, limit: int = 100, db: Ses
             (models.Equipment.storage_location.contains(search)) |
             (models.Equipment.person_in_charge.contains(search))
         )
-    equipments = query.offset(skip).limit(limit).all()
+    
+    if only_unchecked:
+        query = query.filter(subquery.c.last_audit_at == None)
+        
+    results = query.offset(skip).limit(limit).all()
+    
+    # データを整形して返す
+    equipments = []
+    for eq, last_audit_at in results:
+        # Pydanticモデルに変換
+        eq_data = schemas.EquipmentWithStatus.from_orm(eq)
+        eq_data.last_audit_at = last_audit_at
+        # ここでは簡易的に時刻があれば「済」とするロジックに。必要ならステータス名も取得可。
+        if last_audit_at:
+            eq_data.last_audit_status = "完了"
+        equipments.append(eq_data)
+        
     return equipments
 
 @router.delete("/")

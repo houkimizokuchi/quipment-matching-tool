@@ -20,6 +20,10 @@ class Equipment(EquipmentBase):
     class Config:
         from_attributes = True
 
+class EquipmentWithStatus(Equipment):
+    last_audit_at: Optional[datetime] = None
+    last_audit_status: Optional[str] = None
+
 class AuditLogBase(BaseModel):
     equipment_number: str
     status: str = "正常"
